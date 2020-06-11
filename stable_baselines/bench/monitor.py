@@ -10,18 +10,10 @@ from typing import Tuple, Dict, Any, List, Optional
 import gym
 import pandas
 import numpy as np
+from filelock import FileLock
 
 
 class Monitor(gym.Wrapper):
-    """
-    A monitor wrapper for Gym environments, it is used to know the episode reward, length, time and other data.
-
-    :param env: (gym.Env) The environment
-    :param filename: (Optional[str]) the location to save a log file, can be None for no log
-    :param allow_early_resets: (bool) allows the reset of the environment before it is done
-    :param reset_keywords: (tuple) extra keywords for the reset call, if extra parameters are needed at reset
-    :param info_keywords: (tuple) extra information to log, from the information return of environment.step
-    """
     EXT = "monitor.csv"
     file_handler = None
 
@@ -31,6 +23,15 @@ class Monitor(gym.Wrapper):
                  allow_early_resets: bool = True,
                  reset_keywords=(),
                  info_keywords=()):
+        """
+        A monitor wrapper for Gym environments, it is used to know the episode reward, length, time and other data.
+
+        :param env: (gym.Env) The environment
+        :param filename: (Optional[str]) the location to save a log file, can be None for no log
+        :param allow_early_resets: (bool) allows the reset of the environment before it is done
+        :param reset_keywords: (tuple) extra keywords for the reset call, if extra parameters are needed at reset
+        :param info_keywords: (tuple) extra information to log, from the information return of environment.step
+        """
         super(Monitor, self).__init__(env=env)
         self.t_start = time.time()
         if filename is None:
@@ -59,6 +60,47 @@ class Monitor(gym.Wrapper):
         self.episode_times = []
         self.total_steps = 0
         self.current_reset_info = {}  # extra info about the current episode, that was passed in during reset()
+
+        if filename is None:
+            self.file_handler = None
+            self.logger = None
+            self.log_filename = None
+        else:
+            if not filename.endswith(Monitor.EXT):
+                if os.path.isdir(filename):
+                    filename = os.path.join(filename, Monitor.EXT)
+                else:
+                    filename = filename + "." + Monitor.EXT
+            self.log_filename = filename
+            self.log_lockfile = FileLock(self.log_filename+".lock")
+            self.check_log_or_create()
+
+    def check_log_or_create(self):
+        self.log_lockfile.acquire(timeout=30)
+
+        try:
+            if not os.path.exists(self.log_filename):
+                file_handler = open(self.log_filename, "a")
+                file_handler.write('#%s\n' % json.dumps({"t_start": self.t_start, 'env_id': self.env.spec and self.env.spec.id}))
+                logger = csv.DictWriter(file_handler, fieldnames=('r', 'l', 't') + self.reset_keywords + self.info_keywords)
+                logger.writeheader()
+                file_handler.flush()
+                file_handler.close()
+        finally:
+            self.log_lockfile.release()
+
+    def write_file_row(self, ep_info):
+        self.log_lockfile.acquire(timeout=30)
+
+        try:
+            if os.path.exists(self.log_filename):
+                file_handler = open(self.log_filename, "a")
+                logger = csv.DictWriter(file_handler, fieldnames=('r', 'l', 't') + self.reset_keywords + self.info_keywords)
+                logger.writerow(ep_info)
+                file_handler.flush()
+                file_handler.close()
+        finally:
+            self.log_lockfile.release()
 
     def reset(self, **kwargs) -> np.ndarray:
         """
@@ -102,8 +144,7 @@ class Monitor(gym.Wrapper):
             self.episode_times.append(time.time() - self.t_start)
             ep_info.update(self.current_reset_info)
             if self.logger:
-                self.logger.writerow(ep_info)
-                self.file_handler.flush()
+                self.write_file_row(ep_info)
             info['episode'] = ep_info
         self.total_steps += 1
         return observation, reward, done, info
